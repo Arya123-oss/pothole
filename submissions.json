@@ -1,0 +1,66 @@
+[
+    {
+        "id": "20260228_190353",
+        "filepath": "submissions\\20260228_190353_images (15).jpg",
+        "latitude": null,
+        "longitude": null,
+        "timestamp": "2026-02-28 19:03:53",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_190719",
+        "filepath": "submissions\\20260228_190719_images (11).jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 19:07:19",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_191358",
+        "filepath": "submissions\\20260228_191358_images (14).jpg",
+        "latitude": 9.9592,
+        "longitude": 76.3243,
+        "timestamp": "2026-02-28 19:13:58",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_191845",
+        "filepath": "submissions\\20260228_191845_1-s2.0-S0957417425009029-gr3c.jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 19:18:45",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_192014",
+        "filepath": "submissions\\20260228_192014_images (16).jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 19:20:14",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_192052",
+        "filepath": "submissions\\20260228_192052_images (13).jpg",
+        "latitude": null,
+        "longitude": null,
+        "timestamp": "2026-02-28 19:20:52",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_192120",
+        "filepath": "submissions\\20260228_192120_waterlogged-hole-on-the-old-road-free-photo.jpg",
+        "latitude": null,
+        "longitude": null,
+        "timestamp": "2026-02-28 19:21:20",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_192207",
+        "filepath": "submissions\\20260228_192207_stock-photo-road-potholes-flood.jpg",
+        "latitude": null,
+        "longitude": null,
+        "timestamp": "2026-02-28 19:22:07",
+        "status": "Pending Analysis"
+    }
+]
