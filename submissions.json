@@ -62,5 +62,173 @@
         "longitude": null,
         "timestamp": "2026-02-28 19:22:07",
         "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_194903",
+        "filepath": "submissions\\20260228_194903_pothole_exact_mask.png",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 19:49:04",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_205524",
+        "filepath": "submissions\\20260228_205524_potholes-bacchus-marsh-gisbourne-rd-matt-harvey-1200x675.jpeg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 20:55:24",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_210036",
+        "filepath": "submissions\\20260228_210036_images (8).jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 21:00:36",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_210148",
+        "filepath": "submissions\\20260228_210148_closeup-of-pothole-chuckhole-in-asphalt-pavement-road-street-repair-maintenance-and-damage-concept-2W9FG6W.jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 21:01:48",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_210419",
+        "filepath": "submissions\\20260228_210419_images (16).jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 21:04:19",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_210920",
+        "filepath": "submissions\\20260228_210920_186443768-patched-pothole-in-local-rural-road-near-aveiro-portugal-road-maintenance-concept.jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 21:09:21",
+        "status": "Pending"
+    },
+    {
+        "id": "20260228_211536",
+        "filepath": "submissions\\20260228_211536_186443768-patched-pothole-in-local-rural-road-near-aveiro-portugal-road-maintenance-concept.jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 21:15:36",
+        "status": "Pending"
+    },
+    {
+        "id": "20260228_211631",
+        "filepath": "submissions\\20260228_211631_images (12).jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 21:16:31",
+        "status": "Pending"
+    },
+    {
+        "id": "20260228_211713",
+        "filepath": "submissions\\20260228_211713_images (12).jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 21:17:13",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_213411",
+        "filepath": "submissions\\20260228_213411_images (14).jpg",
+        "latitude": 9.9592,
+        "longitude": 76.3243,
+        "timestamp": "2026-02-28 21:34:11",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_213747",
+        "filepath": "submissions\\20260228_213747_186443768-patched-pothole-in-local-rural-road-near-aveiro-portugal-road-maintenance-concept.jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 21:37:47",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_213911",
+        "filepath": "submissions\\20260228_213911_1-s2.0-S0957417425009029-gr3c.jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 21:39:11",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_214609",
+        "filepath": "submissions\\20260228_214609_186443768-patched-pothole-in-local-rural-road-near-aveiro-portugal-road-maintenance-concept.jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 21:46:09",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_214939",
+        "filepath": "submissions\\20260228_214939_186443768-patched-pothole-in-local-rural-road-near-aveiro-portugal-road-maintenance-concept.jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 21:49:39",
+        "status": "In Progress"
+    },
+    {
+        "id": "20260228_215101",
+        "filepath": "submissions\\20260228_215101_images (15).jpg",
+        "latitude": 9.9592,
+        "longitude": 76.3243,
+        "timestamp": "2026-02-28 21:51:01",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_220214",
+        "filepath": "submissions\\20260228_220214_images (16).jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 22:02:14",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_220518",
+        "filepath": "submissions\\20260228_220518_potholes-bacchus-marsh-gisbourne-rd-matt-harvey-1200x675.jpeg",
+        "latitude": 8.526448173692888,
+        "longitude": 76.89276742070969,
+        "timestamp": "2026-02-28 22:05:18",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_221201",
+        "filepath": "submissions\\20260228_221201_images (10).jpg",
+        "latitude": 8.526568910810099,
+        "longitude": 76.89283701112674,
+        "timestamp": "2026-02-28 22:12:01",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_221827",
+        "filepath": "submissions\\20260228_221827_images (17).jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 22:18:27",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_222127",
+        "filepath": "submissions\\20260228_222127_images (13).jpg",
+        "latitude": 8.526734,
+        "longitude": 76.892944,
+        "timestamp": "2026-02-28 22:21:27",
+        "status": "Pending Analysis"
+    },
+    {
+        "id": "20260228_223352",
+        "filepath": "submissions\\20260228_223352_images (13).jpg",
+        "latitude": 8.526448173692888,
+        "longitude": 76.89276742070969,
+        "timestamp": "2026-02-28 22:33:52",
+        "status": "Resolved"
     }
 ]
