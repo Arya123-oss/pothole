@@ -10,6 +10,7 @@ import json
 from datetime import datetime
 from streamlit_geolocation import streamlit_geolocation
 from depth_estimator import DepthEstimator
+from escalation_engine import run_escalation_check, get_overdue_summary, get_email_log, calculate_deadline
 import streamlit.components.v1 as components
 import pydeck as pdk
 from geopy.geocoders import Nominatim
@@ -41,9 +42,51 @@ if not os.path.exists(SUBMISSIONS_FILE):
     with open(SUBMISSIONS_FILE, "w") as f:
         json.dump([], f)
 
+def reclassify_severity_from_score(score: float) -> str:
+    """
+    Derive the correct severity label from a numeric score using the
+    same thresholds as DepthEstimator.classify_severity().
+
+    Thresholds:
+        score < 0.30  → Low
+        score < 0.55  → Medium
+        score >= 0.55 → High
+    """
+    if score < 0.30:
+        return "Low"
+    elif score < 0.55:
+        return "Medium"
+    else:
+        return "High"
+
+
 def load_submissions():
+    """
+    Load submissions from disk and auto-correct any stale severity labels.
+
+    If a submission already has a stored ``severity_score`` but its
+    ``severity`` label was saved under a different threshold regime, the
+    label is recomputed from the score and the corrected value is written
+    back to disk so the JSON stays authoritative.
+    """
     with open(SUBMISSIONS_FILE, "r") as f:
-        return json.load(f)
+        subs = json.load(f)
+
+    dirty = False
+    for sub in subs:
+        score = sub.get("severity_score")
+        if score is not None:                          # has been analysed
+            correct_label = reclassify_severity_from_score(score)
+            if sub.get("severity") != correct_label:  # label is stale
+                sub["severity"] = correct_label
+                dirty = True
+
+    if dirty:                                          # write corrections back once
+        with open(SUBMISSIONS_FILE, "w") as f:
+            json.dump(subs, f, indent=4)
+
+    return subs
+
 
 def save_submission(metadata):
     subs = load_submissions()
@@ -100,14 +143,14 @@ def callback(frame: np.ndarray, confidence: float) -> tuple:
     pothole_info = depth_estimator.analyze_frame(frame, detections)
 
     # Draw severity labels and depth on annotated frame
-    for info in pothole_info:
+    for pothole_num, info in enumerate(pothole_info, start=1):
         x1, y1, x2, y2 = map(int, info["bbox"])
         severity = info["severity"]
         score = info["score"]
         color = info["color"]
 
-        # Label text
-        label = f"{severity} ({score:.0%})"
+        # Label text — include pothole number so it matches the list below
+        label = f"#{pothole_num} {severity} ({score:.0%})"
 
         # Draw label background
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -180,7 +223,7 @@ def video_input(data_src, confidence):
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
             processed_frame, pothole_info = callback(frame, confidence)
-            output.image(processed_frame, caption="Pothole Detection Result", use_column_width=True)
+            output.image(processed_frame, caption="Pothole Detection Result", use_container_width=True)
 
             # Show pothole info for current frame
             if pothole_info:
@@ -291,6 +334,95 @@ def official_dashboard_view(confidence):
         st.session_state["logged_in"] = False
         st.rerun()
 
+    # ── AUTO ESCALATION CHECK ──────────────────────────────────────
+    # Runs every time the dashboard loads — sends real emails for newly overdue complaints
+    with st.spinner("🔍 Checking for overdue complaints and sending escalation emails..."):
+        escalation_actions = run_escalation_check()
+
+    # Flash banner for newly sent emails this session
+    if escalation_actions:
+        newly_sent = [a for a in escalation_actions if a["email_sent"]]
+        newly_failed = [a for a in escalation_actions if not a["email_sent"]]
+        if newly_sent:
+            st.success(
+                f"📧 **{len(newly_sent)} escalation email(s) just sent** to higher officials "
+                f"for overdue complaints."
+            )
+        if newly_failed:
+            st.error(
+                f"❌ **{len(newly_failed)} email(s) failed to send.** "
+                f"Check SMTP credentials in escalation_engine.py."
+            )
+
+    # ── ESCALATION EMAIL LOG ───────────────────────────────────────
+    email_log = get_email_log()
+
+    st.markdown("---")
+    st.subheader("📧 Escalation Emails Sent to Higher Officials")
+
+    if not email_log:
+        st.info(
+            "No escalation emails have been sent yet. "
+            "Emails are dispatched automatically when a repair deadline is missed."
+        )
+    else:
+        # Sort newest first
+        sorted_log = sorted(email_log, key=lambda e: e.get("timestamp", ""), reverse=True)
+
+        for entry in sorted_log:
+            sent_ok      = entry.get("email_sent", False)
+            severity     = entry.get("severity", "N/A")
+            sev_color    = "#dc3545" if severity == "High" else "#fd7e14" if severity == "Medium" else "#28a745"
+            days_over    = entry.get("days_overdue", 0)
+            complaint_id = entry.get("complaint_id", "N/A")
+            sent_time    = entry.get("timestamp", "N/A")
+            to_auth      = entry.get("to_authority", "N/A")
+            to_email     = entry.get("to_email", "N/A")
+            deadline     = entry.get("deadline", "N/A")
+            email_status = entry.get("email_status", "N/A")
+
+            sub_match    = next((s for s in load_submissions() if s["id"] == complaint_id), {})
+            submitted_on = sub_match.get("timestamp", "N/A")
+            latitude     = sub_match.get("latitude")
+            longitude    = sub_match.get("longitude")
+            gps_str      = f"{latitude:.5f}, {longitude:.5f}" if latitude and longitude else "N/A"
+
+            status_label = "✅ Email Sent" if sent_ok else "❌ Email Failed"
+
+            with st.expander(
+                f"{status_label}  ·  To: {to_auth} ({to_email})  ·  {sent_time}",
+                expanded=False,
+            ):
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    st.caption("Complaint ID")
+                    if sub_match and st.button(
+                        f"🔍 {complaint_id}",
+                        key=f"esclog_img_{entry.get('id', complaint_id)}",
+                        help="Click to view the user-submitted image",
+                        use_container_width=True,
+                    ):
+                        show_image_dialog(sub_match)
+                c2.metric("Submitted On", submitted_on[:10] if submitted_on != "N/A" else "N/A")
+                c3.metric("Repair Deadline", deadline[:10] if deadline and deadline != "N/A" else "N/A")
+                c4.metric("Days Overdue", f"{days_over} days")
+
+                st.markdown(
+                    f"**Severity:** &nbsp;"
+                    f"<span style='background:{sev_color}; color:white; padding:2px 12px; "
+                    f"border-radius:4px; font-size:14px; font-weight:bold;'>{severity}</span>"
+                    f"&nbsp;&nbsp;&nbsp; **GPS:** `{gps_str}`"
+                    f"&nbsp;&nbsp;&nbsp; **Email Status:** {email_status}",
+                    unsafe_allow_html=True,
+                )
+                if latitude and longitude:
+                    st.markdown(
+                        f"[📍 View on Google Maps](https://www.google.com/maps?q={latitude},{longitude})"
+                    )
+
+    st.markdown("---")
+
+
     submissions = load_submissions()
     if not submissions:
         st.info("No pothole submissions yet.")
@@ -299,352 +431,389 @@ def official_dashboard_view(confidence):
     # Display submissions
     st.subheader(f"Total Reports: {len(submissions)}")
 
+    # ── SORT CONTROL ───────────────────────────────────────────────
+    sort_col, _ = st.columns([2, 4])
+    with sort_col:
+        sort_option = st.selectbox(
+            "Sort by:",
+            options=["🕐 Recent First", "🔴 Severity: High → Low", "🟢 Severity: Low → High"],
+            index=0,
+            key="pwd_sort_option"
+        )
+
+    # Severity rank map for sorting (higher number = more severe)
+    severity_rank = {"High": 3, "Medium": 2, "Low": 1, None: 0, "": 0}
+
     # Prepare data for tabulated view
     table_data = []
-    for sub in reversed(submissions):
+    for sub in reversed(submissions):   # reversed = recent first baseline
         lat = sub.get('latitude')
         lon = sub.get('longitude')
         place_name = get_place_name(lat, lon) if lat and lon else "Unknown Location"
-        
-        # We will use the timestamp as a unique ID to link the row
         table_data.append({
             "Report ID": sub['id'],
             "Report Time": sub['timestamp'],
-            "Location": place_name.split(',')[0],  # Get just the prominent place name
+            "Location": place_name.split(',')[0],
             "Coordinates": f"{lat:.4f}, {lon:.4f}" if lat and lon else "N/A",
-            "Status": sub.get('status', 'Pending Analysis')
+            "Status": sub.get('status', 'Pending Analysis'),
+            "Severity": sub.get('severity', ''),          # stored after first analysis
+            "_sub": sub,                                   # keep reference for detail loop
         })
-        
+
+    # Apply sort
+    if sort_option == "🔴 Severity: High → Low":
+        table_data.sort(key=lambda r: severity_rank.get(r["Severity"], 0), reverse=True)
+    elif sort_option == "🟢 Severity: Low → High":
+        table_data.sort(key=lambda r: severity_rank.get(r["Severity"], 0), reverse=False)
+    # else: keep "Recent First" (already reversed)
+
+    # Build ordered submissions list to match the chosen sort
+    sorted_submissions = [r["_sub"] for r in table_data]
+
     # Render clickable table
     selected_report_id = st.session_state.get("selected_report_id", "All Reports")
-    
+
     if table_data:
+        # Severity badge helper
+        def severity_badge(sev):
+            if sev == "High":
+                return "🔴 High"
+            elif sev == "Medium":
+                return "🟠 Medium"
+            elif sev == "Low":
+                return "🟢 Low"
+            return "➖ N/A"
+
         # Table header row
-        header = st.columns([2, 2, 2, 2, 2])
+        header = st.columns([2, 2, 2, 1, 2, 2])
         header[0].markdown("**Report ID**")
         header[1].markdown("**Date/Time**")
         header[2].markdown("**Area**")
-        header[3].markdown("**GPS Data**")
-        header[4].markdown("**Status**")
+        header[3].markdown("**Severity**")
+        header[4].markdown("**GPS Data**")
+        header[5].markdown("**Status**")
         st.markdown("<hr style='margin:0; padding:0'>", unsafe_allow_html=True)
-        
+
         # Table data rows — each row is a clickable button
         for d in table_data:
-            cols = st.columns([2, 2, 2, 2, 2])
+            cols = st.columns([2, 2, 2, 1, 2, 2])
             with cols[0]:
                 if st.button(f"🔍 {d['Report ID']}", key=f"row_{d['Report ID']}", use_container_width=True):
-                    st.session_state["selected_report_id"] = d["Report ID"]
-                    st.rerun()
+                    # Open full report in a modal dialog — no scrolling
+                    show_pwd_report_dialog(d["_sub"], confidence)
             cols[1].write(d["Report Time"])
             cols[2].write(d["Location"])
-            cols[3].write(d["Coordinates"])
-            cols[4].write(d["Status"])
-        
-        # Show All button when filtering
-        if selected_report_id != "All Reports":
-            st.markdown("---")
-            st.success(f"Currently viewing Report ID: **{selected_report_id}**")
-            if st.button("🔄 Show All Reports"):
-                st.session_state["selected_report_id"] = "All Reports"
-                st.rerun()
+            cols[3].write(severity_badge(d["Severity"]))
+            cols[4].write(d["Coordinates"])
+            cols[5].write(d["Status"])
 
     st.markdown("---")
-    st.subheader("Detailed Reports & Artificial Intelligence Analysis")
-    
-    # Auto-scroll to selected report using JavaScript
-    if selected_report_id != "All Reports":
-        components.html(
-            f"""
-            <script>
-                const el = window.parent.document.getElementById('report-{selected_report_id}');
-                if (el) {{ el.scrollIntoView({{ behavior: 'smooth', block: 'start' }}); }}
-            </script>
-            """,
-            height=0
+
+
+
+@st.dialog("📋 Report Details & AI Analysis", width="large")
+def show_pwd_report_dialog(sub, confidence):
+    """Modal popup showing the full PWD report: images, AI analysis, severity, map."""
+    import math
+
+    sub_id  = sub['id']
+    lat     = sub.get('latitude')
+    lon     = sub.get('longitude')
+    place_name = get_place_name(lat, lon) if lat and lon else "Unknown Location"
+    current_status = sub.get('status', 'Pending Analysis')
+    valid_statuses = ["Pending Analysis", "In Progress", "Resolved"]
+    if current_status not in valid_statuses:
+        current_status = "Pending Analysis"
+
+    # ── Header info ────────────────────────────────────────────────
+    st.markdown(f"**🆔 Report ID:** `{sub_id}`  &nbsp; | &nbsp; **📅 Submitted:** {sub.get('timestamp','N/A')}")
+    st.markdown(f"**📍 Location:** {place_name}")
+    if lat and lon:
+        st.markdown(f"**📡 GPS:** {lat:.5f}, {lon:.5f} — [View on Map](https://www.google.com/maps?q={lat},{lon})")
+
+    # ── Status updater ─────────────────────────────────────────────
+    new_status = st.selectbox(
+        "Update Status",
+        options=valid_statuses,
+        index=valid_statuses.index(current_status),
+        key=f"dlg_status_{sub_id}"
+    )
+    if new_status != current_status and new_status != "Resolved":
+        update_submission_status(sub_id, new_status)
+        st.success(f"Status updated to **{new_status}**. Refresh to see changes.")
+
+    # ── Repair verification — shown IMMEDIATELY when Resolved is selected ──
+    if new_status == "Resolved" and current_status != "Resolved":
+        st.markdown("---")
+        st.subheader("🔧 Repair Verification — 3 Steps Required")
+        st.info(
+            "To mark this complaint as **Resolved**, you must:\n"
+            "1. Share your **current GPS location** (must be within 500 m of the original pothole)\n"
+            "2. Upload a **photo of the repaired road**\n"
+            "3. Click **Verify & Mark as Resolved** — AI will confirm no potholes remain"
         )
 
-    for idx, sub in enumerate(reversed(submissions)):
-        if selected_report_id != "All Reports" and sub['id'] != selected_report_id:
-            continue
-            
-        lat = sub.get('latitude')
-        lon = sub.get('longitude')
-        
-        # Determine the place name if coordinates exist
-        if lat and lon:
-            place_name = get_place_name(lat, lon)
-            expander_title = f"[ID: {sub['id']}] Report from {sub['timestamp']} - {place_name.split(',')[0]} (Status: {sub.get('status', 'Pending')})"
-        else:
-            place_name = "Unknown Location"
-            expander_title = f"[ID: {sub['id']}] Report from {sub['timestamp']} - Unknown Location (Status: {sub.get('status', 'Pending')})"
+        orig_lat = sub.get('latitude')
+        orig_lon = sub.get('longitude')
 
-        # Anchor for auto-scroll
-        st.markdown(f"<div id='report-{sub['id']}'></div>", unsafe_allow_html=True)
-        
-        with st.expander(expander_title, expanded=(selected_report_id != "All Reports")):
-            
-            col_info, col_status = st.columns([3, 1])
-            with col_info:
-                st.write(f"**Place Name:** {place_name}")
-                st.write(f"**GPS Coordinates:** {lat if lat else 'Unknown'}, {lon if lon else 'Unknown'}")
-            
-            with col_status:
-                current_status = sub.get('status', 'Pending Analysis')
-                # Normalize legacy status values
-                valid_statuses = ["Pending Analysis", "In Progress", "Resolved"]
-                if current_status not in valid_statuses:
-                    current_status = "Pending Analysis"
-                    
-                new_status = st.selectbox(
-                    "Update Status",
-                    options=valid_statuses,
-                    index=valid_statuses.index(current_status),
-                    key=f"status_{sub['id']}"
-                )
-                
-                # Allow immediate change for Pending <-> In Progress
-                if new_status != current_status and new_status != "Resolved":
-                    update_submission_status(sub['id'], new_status)
-                    st.rerun()
-            
-            # If official wants to mark as Resolved, require repair verification
-            if new_status == "Resolved" and current_status != "Resolved":
-                st.markdown("---")
-                st.subheader("🔧 Repair Verification Required")
-                st.write("To mark this complaint as **Resolved**, you must upload a photo of the repaired road from the **same location**.")
-                
-                repair_col1, repair_col2 = st.columns(2)
-                
-                with repair_col1:
-                    st.write("**Step 1: Get your current location**")
-                    repair_location = streamlit_geolocation()
-                
-                with repair_col2:
-                    st.write("**Step 2: Upload repaired road image**")
-                    repair_image = st.file_uploader("Upload repair photo", type=['png', 'jpeg', 'jpg'], key=f"repair_{sub['id']}")
-                
-                if st.button("✅ Verify & Mark as Resolved", key=f"verify_{sub['id']}", type="primary"):
-                    # Check 1: Location verification
-                    if not repair_location or not repair_location.get('latitude') or not repair_location.get('longitude'):
-                        st.error("❌ Location not detected. Please allow location access and try again.")
-                    elif not repair_image:
-                        st.error("❌ Please upload a photo of the repaired road.")
-                    else:
-                        repair_lat = repair_location['latitude']
-                        repair_lon = repair_location['longitude']
-                        orig_lat = sub.get('latitude')
-                        orig_lon = sub.get('longitude')
-                        
-                        # Calculate distance between coordinates (simple Haversine approximation)
-                        import math
-                        def haversine(lat1, lon1, lat2, lon2):
-                            R = 6371000  # Earth radius in meters
-                            phi1, phi2 = math.radians(lat1), math.radians(lat2)
-                            dphi = math.radians(lat2 - lat1)
-                            dlambda = math.radians(lon2 - lon1)
-                            a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
-                            return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1-a))
-                        
-                        if orig_lat and orig_lon:
-                            distance = haversine(orig_lat, orig_lon, repair_lat, repair_lon)
-                            st.info(f"📍 Distance from original report location: **{distance:.0f} meters**")
-                            
-                            if distance > 500:
-                                st.error(f"❌ Location mismatch! You are **{distance:.0f}m** away from the original pothole location. You must be within 500 meters to verify the repair.")
-                            else:
-                                # Load repair image
-                                repair_pil = Image.open(repair_image)
-                                if repair_pil.mode != 'RGB':
-                                    repair_pil = repair_pil.convert('RGB')
-                                repair_np = np.array(repair_pil)
-                                repair_bgr = cv2.cvtColor(repair_np, cv2.COLOR_RGB2BGR)
-                                
-                                # Check 2: Image similarity — verify repair image matches the same scene
-                                with st.spinner("🔍 Comparing original and repair images..."):
-                                    orig_img = cv2.imread(sub['filepath'])
-                                    if orig_img is not None:
-                                        # Resize both to same dimensions for fair comparison
-                                        compare_size = (256, 256)
-                                        orig_resized = cv2.resize(orig_img, compare_size)
-                                        repair_resized = cv2.resize(repair_bgr, compare_size)
-                                        
-                                        # Convert to HSV for better color-based comparison
-                                        orig_hsv = cv2.cvtColor(orig_resized, cv2.COLOR_BGR2HSV)
-                                        repair_hsv = cv2.cvtColor(repair_resized, cv2.COLOR_BGR2HSV)
-                                        
-                                        # Calculate histograms
-                                        hist_orig = cv2.calcHist([orig_hsv], [0, 1], None, [50, 60], [0, 180, 0, 256])
-                                        hist_repair = cv2.calcHist([repair_hsv], [0, 1], None, [50, 60], [0, 180, 0, 256])
-                                        
-                                        cv2.normalize(hist_orig, hist_orig)
-                                        cv2.normalize(hist_repair, hist_repair)
-                                        
-                                        similarity = cv2.compareHist(hist_orig, hist_repair, cv2.HISTCMP_CORREL)
-                                        st.info(f"🖼️ Image scene similarity: **{similarity:.2%}**")
-                                
-                                if orig_img is not None and similarity < 0.3:
-                                    st.error("❌ The uploaded repair image does not appear to match the original complaint location. The scenes look completely different. Please upload a photo from the same road/area.")
-                                    comp_col1, comp_col2 = st.columns(2)
-                                    with comp_col1:
-                                        st.image(cv2.cvtColor(orig_img, cv2.COLOR_BGR2RGB), caption="Original Complaint Image")
-                                    with comp_col2:
-                                        st.image(repair_np, caption="Your Uploaded Repair Image")
-                                else:
-                                    # Check 3: YOLO verification — no potholes should be detected
-                                    with st.spinner("🔍 AI is checking the repaired road for remaining potholes..."):
-                                        repair_results = model(repair_bgr, conf=confidence)[0]
-                                        num_potholes = len(repair_results.boxes)
-                                    
-                                    if num_potholes > 0:
-                                        st.error(f"❌ Verification failed! The AI still detects **{num_potholes} pothole(s)** in the uploaded repair image. The road does not appear to be fully repaired.")
-                                        st.image(repair_np, caption="Uploaded Repair Image (Potholes Still Detected)")
-                                    else:
-                                        st.success("✅ Verification passed! Images match, no potholes detected, and location confirmed. Marking as Resolved.")
-                                        st.image(repair_np, caption="Verified Repair Image — No Potholes Detected")
-                                        
-                                        # Save repair image
-                                        repair_filename = f"repair_{sub['id']}.jpg"
-                                        repair_filepath = os.path.join(SUBMISSIONS_DIR, repair_filename)
-                                        repair_pil.save(repair_filepath)
-                                        
-                                        update_submission_status(sub['id'], "Resolved")
-                                        st.balloons()
-                                        st.rerun()
-                        else:
-                            st.warning("⚠️ Original complaint has no GPS coordinates. Skipping location check.")
-                            # Still check for potholes
-                            with st.spinner("🔍 AI is checking the repaired road..."):
-                                repair_pil = Image.open(repair_image)
-                                if repair_pil.mode != 'RGB':
-                                    repair_pil = repair_pil.convert('RGB')
-                                repair_np = np.array(repair_pil)
-                                repair_bgr = cv2.cvtColor(repair_np, cv2.COLOR_RGB2BGR)
-                                
-                                repair_results = model(repair_bgr, conf=confidence)[0]
-                                num_potholes = len(repair_results.boxes)
-                            
-                            if num_potholes > 0:
-                                st.error(f"❌ Verification failed! AI still detects **{num_potholes} pothole(s)**.")
-                            else:
-                                st.success("✅ No potholes detected. Marking as Resolved.")
-                                update_submission_status(sub['id'], "Resolved")
-                                st.balloons()
-                                st.rerun()
+        # Step 1 — Location
+        st.markdown("#### 📍 Step 1: Share Your Current Location")
+        repair_location = streamlit_geolocation()
 
-            if not os.path.exists(sub['filepath']):
-                st.error("Image file not found.")
-                continue
+        repair_lat, repair_lon = None, None
+        location_ok = False
+        repair_pil = None
 
-            # Load image for processing
-            image = cv2.imread(sub['filepath'])
-            if image is None:
-                st.error("Could not read image file.")
-                continue
-
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.image(image_rgb, caption="Original User Submission")
-            
-            # Show repair image for resolved reports
-            if current_status == "Resolved":
-                repair_path = os.path.join(SUBMISSIONS_DIR, f"repair_{sub['id']}.jpg")
-                if os.path.exists(repair_path):
-                    with col2:
-                        repair_img = Image.open(repair_path)
-                        st.image(repair_img, caption="🟢 After Repair (Verified)")
-                    st.success("✅ This pothole has been repaired and verified.")
-
-            # Run Analysis
-            with col2:
-                with st.spinner("Analyzing image..."):
-                    # The callback expects an image in RGB format, so passing image_rgb is correct.
-                    # HOWEVER! The callback currently has: bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                    processed_image, pothole_info = callback(image_rgb, confidence)
-                    st.image(processed_image, caption="AI Detection + Severity Result")
-
-            # Display stats and map
-            if pothole_info:
-                st.markdown("---")
-                st.subheader("🕳️ Analysis Results")
-                
-                # Determine highest severity for map marker color
-                max_severity_score = max(info["score"] for info in pothole_info)
-                if max_severity_score < 0.30:
-                    overall_severity, marker_color = "Low", [40, 167, 69]       # Green
-                elif max_severity_score < 0.55:
-                    overall_severity, marker_color = "Medium", [253, 126, 20]   # Orange
+        if repair_location and repair_location.get('latitude') and repair_location.get('longitude'):
+            repair_lat = repair_location['latitude']
+            repair_lon = repair_location['longitude']
+            if orig_lat and orig_lon:
+                def haversine(lat1, lon1, lat2, lon2):
+                    R = 6371000
+                    p1, p2 = math.radians(lat1), math.radians(lat2)
+                    dp = math.radians(lat2 - lat1)
+                    dl = math.radians(lon2 - lon1)
+                    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+                    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1-a))
+                distance = haversine(orig_lat, orig_lon, repair_lat, repair_lon)
+                if distance <= 500:
+                    st.success(f"✅ Location confirmed — you are **{distance:.0f} m** from the reported pothole.")
+                    location_ok = True
                 else:
-                    overall_severity, marker_color = "High", [220, 53, 69]      # Red
-
-                for i, info in enumerate(pothole_info):
-                    severity = info["severity"]
-                    score = info["score"]
-
-                    if severity == "Low":
-                        color_hex = "#28a745"
-                    elif severity == "Medium":
-                        color_hex = "#fd7e14"
-                    else:
-                        color_hex = "#dc3545"
-
-                    x1, y1, x2, y2 = map(int, info["bbox"])
-                    width_px = x2 - x1
-                    height_px = y2 - y1
-                    size_pct = info['size_ratio'] * 100
-
-                    st.markdown(
-                        f"**Pothole {i+1}** &nbsp; "
-                        f"<span style='background-color:{color_hex}; color:white; padding:2px 10px; "
-                        f"border-radius:4px; font-weight:bold;'>{severity}</span> &nbsp; "
-                        f"Severity Score: **{score:.0%}** &nbsp; | &nbsp; "
-                        f"Size: {width_px}×{height_px} px ({size_pct:.1f}% of image) &nbsp; | &nbsp; "
-                        f"Depth Contrast: {info['depth_contrast']:.3f}",
-                        unsafe_allow_html=True,
-                    )
-                
-                # Render the Map with Color coding
-                if lat and lon:
-                    st.markdown("---")
-                    st.subheader(f"🗺️ Map Location (Overall Severity: {overall_severity})")
-                    map_data = [{"lat": lat, "lon": lon, "color": marker_color}]
-                    
-                    st.pydeck_chart(pdk.Deck(
-                        map_style=None,
-                        initial_view_state=pdk.ViewState(
-                            latitude=lat,
-                            longitude=lon,
-                            zoom=17,
-                            pitch=45,
-                        ),
-                        layers=[
-                            pdk.Layer(
-                                'ScatterplotLayer',
-                                data=map_data,
-                                get_position='[lon, lat]',
-                                get_fill_color='color',
-                                get_radius=50,
-                                radius_min_pixels=15,
-                                radius_max_pixels=35,
-                                pickable=True,
-                            ),
-                        ],
-                    ))
+                    st.error(f"❌ You are **{distance:.0f} m** away. Must be within **500 m** to verify the repair.")
             else:
-                height, width = image_rgb.shape[:2]
-                if width < 300 or height < 300:
-                    st.warning("No potholes detected. ⚠️ Note: This image is extremely small or low resolution. The AI cannot reliably detect features on thumbnail-sized or highly pixelated images.")
+                st.warning("⚠️ Original complaint has no GPS. Location check skipped.")
+                location_ok = True
+        else:
+            st.caption("⏳ Waiting for location… Allow browser location access if prompted.")
+
+        # Step 2 — Upload image
+        st.markdown("#### 📸 Step 2: Upload Repaired Road Photo")
+        repair_image = st.file_uploader(
+            "Upload a clear photo of the repaired road",
+            type=['png', 'jpeg', 'jpg'],
+            key=f"dlg_repair_{sub_id}"
+        )
+        if repair_image:
+            repair_pil = Image.open(repair_image)
+            if repair_pil.mode != 'RGB':
+                repair_pil = repair_pil.convert('RGB')
+            st.image(repair_pil, caption="📷 Repair photo preview", use_container_width=True)
+
+        # Step 3 — Verify button
+        st.markdown("#### ✅ Step 3: Verify & Submit")
+        if st.button("✅ Verify & Mark as Resolved", key=f"dlg_verify_{sub_id}", type="primary"):
+            errors = []
+            if not repair_location or not repair_location.get('latitude'):
+                errors.append("❌ Location not detected — please allow location access and wait for it to load.")
+            elif not location_ok:
+                errors.append("❌ Your location is too far from the original pothole. Move closer and try again.")
+            if not repair_image:
+                errors.append("❌ Please upload a photo of the repaired road.")
+            if errors:
+                for e in errors:
+                    st.error(e)
+            else:
+                repair_np  = np.array(repair_pil)
+                repair_bgr = cv2.cvtColor(repair_np, cv2.COLOR_RGB2BGR)
+                with st.spinner("🤖 AI is checking the repaired road for remaining potholes..."):
+                    repair_results = model(repair_bgr, conf=confidence)[0]
+                    num_potholes   = len(repair_results.boxes)
+                if num_potholes > 0:
+                    st.error(
+                        f"❌ Verification failed — AI still detects **{num_potholes} pothole(s)**. "
+                        "Please ensure the road is fully repaired and upload a clear photo."
+                    )
+                    st.image(repair_np, caption="Repair Photo (Potholes Still Detected)", use_container_width=True)
                 else:
-                    st.info("""
-                    **No potholes detected in this submission.** 
-                    
-                    *Possible reasons for this result:*
-                    - The AI confidence threshold is set too high (currently {:.0%}). Try adjusting the slider on the left.
-                    - The image quality is poor, blurry, or completely lacks depth contrast.
-                    - The damage on the road is just a dry patch/discoloration and not an actual deep pothole.
-                    - The pothole is obscured by shadows, water, or debris.
-                    """.format(confidence))
+                    repair_pil.save(os.path.join(SUBMISSIONS_DIR, f"repair_{sub_id}.jpg"))
+                    update_submission_status(sub_id, "Resolved")
+                    st.success("✅ All checks passed! Location confirmed, no potholes detected. Complaint marked as **Resolved**.")
+                    st.balloons()
+        return   # Don't show images/map until verification is done
+
+    st.markdown("---")
+
+    # ── Check image exists ─────────────────────────────────────────
+    if not os.path.exists(sub.get('filepath', '')):
+        st.error("Image file not found.")
+        return
+
+    image = cv2.imread(sub['filepath'])
+    if image is None:
+        st.error("Could not read image file.")
+        return
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.image(image_rgb, caption="📸 Original User Submission", use_container_width=True)
+
+    # Show repair image for resolved reports
+    if current_status == "Resolved":
+        repair_path = os.path.join(SUBMISSIONS_DIR, f"repair_{sub_id}.jpg")
+        if os.path.exists(repair_path):
+            with col2:
+                st.image(Image.open(repair_path), caption="🟢 After Repair (Verified)", use_container_width=True)
+        st.success("✅ This pothole has been repaired and verified.")
+        return
+
+    # ── AI Analysis ────────────────────────────────────────────────
+    with col2:
+        with st.spinner("🤖 Running AI analysis..."):
+            processed_image, pothole_info = callback(image_rgb, confidence)
+        st.image(processed_image, caption="🔍 AI Detection + Severity Result", use_container_width=True)
+
+    # ── Pothole details ────────────────────────────────────────────
+    if pothole_info:
+        st.markdown("---")
+        st.subheader("🕳️ Analysis Results")
+
+        max_severity_score = max(info["score"] for info in pothole_info)
+        if max_severity_score < 0.30:
+            overall_severity, marker_color = "Low",    [40, 167, 69]
+        elif max_severity_score < 0.55:
+            overall_severity, marker_color = "Medium", [253, 126, 20]
+        else:
+            overall_severity, marker_color = "High",   [220, 53, 69]
+
+        if not sub.get("severity"):
+            subs_all = load_submissions()
+            for s in subs_all:
+                if s["id"] == sub_id:
+                    s["severity"]       = overall_severity
+                    s["severity_score"] = max_severity_score
+                    s["deadline"]       = calculate_deadline(sub["timestamp"], overall_severity)
+                    s["analyzed_at"]    = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    break
+            with open(SUBMISSIONS_FILE, "w") as f:
+                json.dump(subs_all, f, indent=4)
+
+        for i, info in enumerate(pothole_info):
+            sev       = info["severity"]
+            score     = info["score"]
+            color_hex = "#28a745" if sev == "Low" else "#fd7e14" if sev == "Medium" else "#dc3545"
+            x1, y1, x2, y2 = map(int, info["bbox"])
+            w_px  = x2 - x1
+            h_px  = y2 - y1
+            s_pct = info['size_ratio'] * 100
+            st.markdown(
+                f"**Pothole {i+1}** &nbsp; "
+                f"<span style='background:{color_hex}; color:white; padding:2px 10px; "
+                f"border-radius:4px; font-weight:bold;'>{sev}</span> &nbsp; "
+                f"Score: **{score:.0%}** &nbsp;|&nbsp; "
+                f"Size: {w_px}×{h_px} px ({s_pct:.1f}%) &nbsp;|&nbsp; "
+                f"Depth Contrast: {info['depth_contrast']:.3f}",
+                unsafe_allow_html=True,
+            )
+
+    else:
+        h, w = image_rgb.shape[:2]
+        if w < 300 or h < 300:
+            st.warning("No potholes detected — image resolution is too low for AI analysis.")
+        else:
+            st.info("**No potholes detected** in this submission.")
+
+    # ── Map always shown when GPS is available ──────────────────────
+    if lat and lon:
+        # Use live severity color if available, otherwise fall back to stored severity
+        if not pothole_info:
+            stored_sev = sub.get("severity", "Low")
+            overall_severity = stored_sev
+            marker_color = (
+                [220, 53, 69]  if stored_sev == "High"   else
+                [253, 126, 20] if stored_sev == "Medium" else
+                [40, 167, 69]
+            )
+        st.markdown("---")
+        st.subheader(f"🗺️ Map Location (Overall Severity: {overall_severity})")
+        st.pydeck_chart(pdk.Deck(
+            map_style=None,
+            initial_view_state=pdk.ViewState(latitude=lat, longitude=lon, zoom=17, pitch=45),
+            layers=[pdk.Layer(
+                'ScatterplotLayer',
+                data=[{"lat": lat, "lon": lon, "color": marker_color}],
+                get_position='[lon, lat]',
+                get_fill_color='color',
+                get_radius=50,
+                radius_min_pixels=15,
+                radius_max_pixels=35,
+                pickable=True,
+            )],
+        ))
+
+
+
+
+
+
+@st.dialog("📸 Submitted Image", width="large")
+def show_image_dialog(sub):
+    """Modal dialog showing only the user-submitted image for a complaint."""
+    filepath = sub.get("filepath", "")
+    lat = sub.get("latitude")
+    lon = sub.get("longitude")
+    place_name = get_place_name(lat, lon) if lat and lon else "Unknown Location"
+    status = sub.get("status", "Pending Analysis")
+
+    st.markdown(f"**🆔 Report ID:** `{sub['id']}`")
+    st.markdown(f"**📍 Location:** {place_name.split(',')[0]}")
+    st.markdown(f"**🕐 Filed On:** {sub.get('timestamp', 'N/A')}")
+    st.markdown(f"**📡 GPS:** {f'{lat:.5f}, {lon:.5f}' if lat and lon else 'N/A'}")
+
+    if status == "Resolved":
+        st.success("✅ Status: Resolved")
+    elif status == "In Progress":
+        st.warning("🔧 Status: In Progress")
+    else:
+        st.info("⏳ Status: Pending Analysis")
+
+    st.markdown("---")
+    if filepath and os.path.exists(filepath):
+        orig_img = Image.open(filepath)
+        st.image(orig_img, caption="📸 User Submitted Image", use_container_width=True)
+    else:
+        st.warning("⚠️ Original image file not found.")
+
+
+@st.dialog("🚨 Escalated Report Details", width="large")
+def show_escalated_report_dialog(sub, days_overdue):
+    """Modal showing submitted image, date, location and overdue info for an escalated complaint."""
+    sub_id   = sub.get("id", "N/A")
+    lat      = sub.get("latitude")
+    lon      = sub.get("longitude")
+    filepath = sub.get("filepath", "")
+    place_name = get_place_name(lat, lon) if lat and lon else "Unknown Location"
+    severity = sub.get("severity", "N/A")
+    sev_color = "#dc3545" if severity == "High" else "#fd7e14" if severity == "Medium" else "#28a745"
+    deadline  = sub.get("deadline", "N/A")
+
+    # Header info
+    st.markdown(f"**🆔 Report ID:** `{sub_id}`")
+    st.markdown(f"**📍 Location:** {place_name}")
+    if lat and lon:
+        st.markdown(f"**📡 GPS:** `{lat:.5f}, {lon:.5f}` — [View on Map](https://www.google.com/maps?q={lat},{lon})")
+    st.markdown(f"**🕐 Reported On:** {sub.get('timestamp', 'N/A')}")
+
+    # Key metrics
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(
+        f"**Severity**\n\n"
+        f"<span style='background:{sev_color}; color:white; padding:3px 14px; "
+        f"border-radius:4px; font-size:15px; font-weight:bold;'>{severity}</span>",
+        unsafe_allow_html=True,
+    )
+    c2.metric("Repair Deadline", deadline[:10] if deadline and deadline != "N/A" else "N/A")
+    c3.metric("Days Overdue", f"{days_overdue} days", delta=f"+{days_overdue}", delta_color="inverse")
+
+    st.error(f"⚠️ This complaint is **{days_overdue} day(s) overdue** and has been escalated to higher officials.")
+    st.markdown("---")
+
+    # Image
+    if filepath and os.path.exists(filepath):
+        st.image(Image.open(filepath), caption="📸 User Submitted Image", use_container_width=True)
+    else:
+        st.warning("⚠️ Original image file not found.")
 
 
 def complaint_status_view():
@@ -656,6 +825,61 @@ def complaint_status_view():
         st.info("No complaints have been filed yet.")
         return
 
+    # ── ESCALATED REPORTS SECTION ──────────────────────────────────
+    email_log = get_email_log()
+    if email_log:
+        # Build a unique set: complaint_id → max days_overdue from the log
+        escalated_map = {}
+        for entry in email_log:
+            cid  = entry.get("complaint_id")
+            days = entry.get("days_overdue", 0)
+            if cid and (cid not in escalated_map or days > escalated_map[cid]):
+                escalated_map[cid] = days
+
+        if escalated_map:
+            sub_lookup = {s["id"]: s for s in submissions}
+            st.markdown("---")
+            st.subheader("🚨 Reports Escalated to Higher Officials")
+            st.caption(
+                "The following complaints missed their repair deadline and have been "
+                "escalated to senior authorities. Click a Report ID for details."
+            )
+
+            # Column header
+            h = st.columns([2, 2, 2, 1, 1])
+            h[0].markdown("**Report ID**")
+            h[1].markdown("**Reported On**")
+            h[2].markdown("**Area**")
+            h[3].markdown("**Severity**")
+            h[4].markdown("**Days Overdue**")
+            st.markdown("<hr style='margin:4px 0'>", unsafe_allow_html=True)
+
+            for cid, days_over in sorted(escalated_map.items(), key=lambda x: x[1], reverse=True):
+                sub = sub_lookup.get(cid)
+                if not sub:
+                    continue
+                lat = sub.get("latitude")
+                lon = sub.get("longitude")
+                area = get_place_name(lat, lon).split(",")[0] if lat and lon else "Unknown"
+                severity = sub.get("severity", "N/A")
+                sev_icon = "🔴" if severity == "High" else "🟠" if severity == "Medium" else "🟢"
+
+                cols = st.columns([2, 2, 2, 1, 1])
+                with cols[0]:
+                    if st.button(
+                        f"🔍 {cid}",
+                        key=f"esc_{cid}",
+                        use_container_width=True,
+                        help="Click to view submitted image and details",
+                    ):
+                        show_escalated_report_dialog(sub, days_over)
+                cols[1].write(sub.get("timestamp", "N/A"))
+                cols[2].write(area)
+                cols[3].write(f"{sev_icon} {severity}")
+                cols[4].write(f"**{days_over}d**")
+
+            st.markdown("---")
+
     # Prepare table data
     status_data = []
     for sub in reversed(submissions):
@@ -664,7 +888,6 @@ def complaint_status_view():
         place_name = get_place_name(lat, lon) if lat and lon else "Unknown Location"
         status = sub.get('status', 'Pending Analysis')
 
-        # Assign emoji based on status
         if status == "Resolved":
             status_icon = "✅ Resolved"
         elif status == "In Progress":
@@ -673,46 +896,58 @@ def complaint_status_view():
             status_icon = "⏳ Pending Analysis"
 
         status_data.append({
-            "Report ID": sub['id'],
-            "Date": sub['timestamp'],
+            "id":       sub['id'],
+            "Date":     sub['timestamp'],
             "Location": place_name.split(',')[0],
-            "Status": status_icon
+            "Status":   status_icon,
+            "_sub":     sub,
         })
 
-    df = pd.DataFrame(status_data)
-
-    # Summary counts
-    total = len(status_data)
-    pending = sum(1 for d in status_data if "Pending" in d["Status"])
+    # ── Summary metrics ────────────────────────────────────────────
+    total       = len(status_data)
+    pending     = sum(1 for d in status_data if "Pending"     in d["Status"])
     in_progress = sum(1 for d in status_data if "In Progress" in d["Status"])
-    resolved = sum(1 for d in status_data if "Resolved" in d["Status"])
+    resolved    = sum(1 for d in status_data if "Resolved"    in d["Status"])
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total Complaints", total)
-    col2.metric("⏳ Pending", pending)
-    col3.metric("🔧 In Progress", in_progress)
-    col4.metric("✅ Resolved", resolved)
+    col2.metric("⏳ Pending",      pending)
+    col3.metric("🔧 In Progress",   in_progress)
+    col4.metric("✅ Resolved",      resolved)
 
     st.markdown("---")
 
-    # Filter
-    filter_option = st.selectbox("Filter by status:", ["All", "⏳ Pending Analysis", "🔧 In Progress", "✅ Resolved"])
-    if filter_option != "All":
-        df = df[df["Status"] == filter_option]
-
-    st.dataframe(
-        df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Report ID": "Complaint ID",
-            "Date": st.column_config.DatetimeColumn("Filed On", format="YYYY-MM-DD HH:mm"),
-            "Location": "Area",
-            "Status": "Current Status"
-        }
+    # ── Filter ─────────────────────────────────────────────────────
+    filter_option = st.selectbox(
+        "Filter by status:",
+        ["All", "⏳ Pending Analysis", "🔧 In Progress", "✅ Resolved"],
+        key="status_filter",
     )
-    
-    # Show before/after images for resolved complaints
+    filtered_data = [
+        d for d in status_data
+        if filter_option == "All" or d["Status"] == filter_option
+    ]
+
+    # ── Single unified clickable table ─────────────────────────────
+    hdr = st.columns([3, 2, 2, 2])
+    hdr[0].markdown("**Complaint ID**")
+    hdr[1].markdown("**Filed On**")
+    hdr[2].markdown("**Area**")
+    hdr[3].markdown("**Status**")
+    st.markdown("<hr style='margin:4px 0'>", unsafe_allow_html=True)
+
+    sub_map = {sub["id"]: sub for sub in submissions}
+    for row in filtered_data:
+        cols = st.columns([3, 2, 2, 2])
+        with cols[0]:
+            if st.button(f"🔍 {row['id']}", key=f"cs_{row['id']}", use_container_width=True, help="Click to view submitted image"):
+                show_image_dialog(sub_map[row["id"]])
+        cols[1].write(row["Date"])
+        cols[2].write(row["Location"])
+        cols[3].write(row["Status"])
+
+
+    # ── RESOLVED BEFORE/AFTER SECTION ─────────────────────────────
     resolved_subs = [sub for sub in reversed(submissions) if sub.get('status') == 'Resolved']
     if resolved_subs:
         st.markdown("---")
@@ -741,6 +976,7 @@ def complaint_status_view():
                     st.info("Images not available for this complaint.")
 
 
+
 def main():
     st.title("🕳️ Pothole Detection & Severity Analysis System")
 
@@ -755,10 +991,7 @@ def main():
     selected_view = st.sidebar.radio("Go to:", view_options, index=view_options.index(st.session_state["current_view"]))
     st.session_state["current_view"] = selected_view
 
-    st.sidebar.markdown("---")
-    confidence = st.sidebar.slider('AI Confidence Threshold', min_value=0.1, max_value=1.0, value=0.3)
-
-    st.sidebar.markdown("---")
+    confidence = 0.3
 
     # Routing
     if selected_view == "Public Reporter":
